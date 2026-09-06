@@ -4,12 +4,19 @@ import Company from "../models/Company.js";
 import generateUserId from "../utils/generateUserId.js";
 import { createAndStoreOTP, verifyOTP, resendOTP } from "../utils/otpStore.js";
 import { sendSMS } from "../services/smsService.js";
+import { sendEmail } from "../services/emailService.js";
 import { generateAccessToken, generateRefreshToken } from "../utils/generateTokens.js";
 import {
   storeRefreshToken,
   getRefreshToken,
   deleteRefreshToken,
 } from "../utils/refreshTokenStore.js";
+import {
+  createAndStoreResetToken,
+  verifyResetToken,
+  deleteResetToken,
+  canRequestReset,
+} from "../utils/resetTokenStore.js";
 import jwt from "jsonwebtoken";
 
 const REFRESH_COOKIE_OPTIONS = {
@@ -285,6 +292,87 @@ async function logout(req, res) {
   }
 }
 
+
+/**
+ * POST /api/auth/forgot-password
+ */
+async function forgotPassword(req, res) {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: "Email is required." });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    // Always respond the same way, whether or not the email exists —
+    // prevents leaking which emails are registered.
+    const genericResponse = {
+      message: "If an account with that email exists, a reset link has been sent.",
+    };
+
+    if (!user) {
+      return res.status(200).json(genericResponse);
+    }
+
+    const cooldown = await canRequestReset(user.userId);
+    if (!cooldown.allowed) {
+      return res.status(200).json(genericResponse); // don't reveal cooldown state either
+    }
+
+    const token = await createAndStoreResetToken(user.userId);
+    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${token}&userId=${user.userId}`;
+
+    await sendEmail(
+      user.email,
+      "Reset Your Password",
+      `<p>Hi ${user.name},</p>
+       <p>Click the link below to reset your password. This link expires in 30 minutes.</p>
+       <p><a href="${resetLink}">${resetLink}</a></p>
+       <p>If you didn't request this, you can safely ignore this email.</p>`
+    );
+
+    return res.status(200).json(genericResponse);
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return res.status(500).json({ message: "Something went wrong. Please try again." });
+  }
+}
+
+/**
+ * POST /api/auth/reset-password
+ */
+async function resetPassword(req, res) {
+  try {
+    const { userId, token, newPassword } = req.body;
+
+    if (!userId || !token || !newPassword) {
+      return res.status(400).json({ message: "All fields are required." });
+    }
+
+    const isValid = await verifyResetToken(userId, token);
+    if (!isValid) {
+      return res.status(400).json({ message: "Invalid or expired reset link." });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, 10);
+    user.mustResetPassword = false;
+    await user.save();
+
+    await deleteResetToken(userId);
+
+    return res.status(200).json({ message: "Password reset successfully. Please log in." });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    return res.status(500).json({ message: "Something went wrong. Please try again." });
+  }
+}
+
 export {
   register,
   verifyOwner,
@@ -292,4 +380,7 @@ export {
   login,
   refreshTokenController,
   logout,
+  forgotPassword,
+  resetPassword,
 };
+

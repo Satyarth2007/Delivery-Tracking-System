@@ -6,6 +6,8 @@ import {
   login,
   refreshTokenController,
   logout,
+  forgotPassword,
+  resetPassword,
 } from "../controller/auth.controller.js";
 import { registerLimiter, loginLimiter, otpRouteLimiter } from "../middleware/rateLimiter.js";
 
@@ -17,5 +19,7 @@ router.post("/resend-otp", otpRouteLimiter, resendOtpController);
 router.post("/login", loginLimiter, login);
 router.post("/refresh-token", refreshTokenController);
 router.post("/logout", logout);
+router.post("/forgot-password", loginLimiter, forgotPassword); // reuse loginLimiter — same abuse pattern
+router.post("/reset-password", loginLimiter, resetPassword);
 
 export default router;
