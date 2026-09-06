@@ -1,14 +1,42 @@
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import Company from "../models/Company.js";
 import generateUserId from "../utils/generateUserId.js";
 import { createAndStoreOTP, verifyOTP, resendOTP } from "../utils/otpStore.js";
 import { sendSMS } from "../services/smsService.js";
+import { generateAccessToken, generateRefreshToken } from "../utils/generateTokens.js";
+import {
+  storeRefreshToken,
+  getRefreshToken,
+  deleteRefreshToken,
+} from "../utils/refreshTokenStore.js";
+import jwt from "jsonwebtoken";
+
+const REFRESH_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production", // HTTPS only in prod
+  sameSite: "strict",
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+};
+
+/**
+ * Helper: issues both tokens, stores refresh token in Redis, and
+ * sets it as an httpOnly cookie on the response.
+ */
+async function issueTokens(res, user) {
+  const payload = { userId: user.userId, role: user.role, companyId: user.companyId };
+
+  const accessToken = generateAccessToken(payload);
+  const refreshToken = generateRefreshToken(payload);
+
+  await storeRefreshToken(user.userId, refreshToken);
+  res.cookie("refreshToken", refreshToken, REFRESH_COOKIE_OPTIONS);
+
+  return accessToken;
+}
 
 /**
  * POST /api/auth/register
- * Registers the founding dispatcher + creates their Company.
  */
 async function register(req, res) {
   try {
@@ -18,28 +46,16 @@ async function register(req, res) {
       return res.status(400).json({ message: "All fields are required." });
     }
 
-    // Check if this email/phone is already used in ANY pending/active state
-    // for a company they'd be founding (email/phone + companyId uniqueness
-    // only makes sense once companyId exists, so we check broadly here
-    // to avoid orphaned duplicate founder accounts).
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
       return res.status(409).json({ message: "Email is already registered." });
     }
 
-    // Create Company first (pending_review by default)
-    const company = await Company.create({
-      name: companyName,
-      ownerId: null, // will be set after User is created
-    });
+    const company = await Company.create({ name: companyName, ownerId: null });
 
-    // Hash password
     const passwordHash = await bcrypt.hash(password, 10);
-
-    // Generate unique human-readable userId
     const userId = await generateUserId();
 
-    // Create founding dispatcher User
     const user = await User.create({
       userId,
       name,
@@ -52,11 +68,9 @@ async function register(req, res) {
       status: "pending",
     });
 
-    // Link company back to its owner
     company.ownerId = user._id;
     await company.save();
 
-    // Generate and send OTP
     const otp = await createAndStoreOTP(user.userId);
     await sendSMS(phone, `Your verification OTP is ${otp}. Valid for 10 minutes.`);
 
@@ -72,7 +86,6 @@ async function register(req, res) {
 
 /**
  * POST /api/auth/verify-owner
- * Verifies the OTP and activates the founding dispatcher's account.
  */
 async function verifyOwner(req, res) {
   try {
@@ -105,16 +118,11 @@ async function verifyOwner(req, res) {
     user.activatedAt = new Date();
     await user.save();
 
-    // Issue JWT
-    const token = jwt.sign(
-      { userId: user.userId, role: user.role, companyId: user.companyId },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    const accessToken = await issueTokens(res, user);
 
     return res.status(200).json({
       message: "Account activated successfully.",
-      token,
+      accessToken,
       user: {
         userId: user.userId,
         name: user.name,
@@ -189,15 +197,11 @@ async function login(req, res) {
       return res.status(401).json({ message: "Invalid credentials." });
     }
 
-    const token = jwt.sign(
-      { userId: user.userId, role: user.role, companyId: user.companyId },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    const accessToken = await issueTokens(res, user);
 
     return res.status(200).json({
       message: "Login successful.",
-      token,
+      accessToken,
       user: {
         userId: user.userId,
         name: user.name,
@@ -212,4 +216,80 @@ async function login(req, res) {
   }
 }
 
-export { register, verifyOwner, resendOtpController, login };
+/**
+ * POST /api/auth/refresh-token
+ * Reads the refresh token from the httpOnly cookie, validates it against
+ * both its signature AND what's stored in Redis, issues a new access token.
+ */
+async function refreshTokenController(req, res) {
+  try {
+    const token = req.cookies?.refreshToken;
+    if (!token) {
+      return res.status(401).json({ message: "No refresh token provided." });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+    } catch {
+      return res.status(401).json({ message: "Invalid or expired refresh token." });
+    }
+
+    const storedToken = await getRefreshToken(decoded.userId);
+    if (!storedToken || storedToken !== token) {
+      // Token was revoked (logout) or superseded by a newer login
+      return res.status(401).json({ message: "Refresh token no longer valid. Please log in again." });
+    }
+
+    const user = await User.findOne({ userId: decoded.userId });
+    if (!user || user.status !== "active") {
+      return res.status(401).json({ message: "Account is not active." });
+    }
+
+    const accessToken = generateAccessToken({
+      userId: user.userId,
+      role: user.role,
+      companyId: user.companyId,
+    });
+
+    return res.status(200).json({ accessToken });
+  } catch (error) {
+    console.error("Refresh token error:", error);
+    return res.status(500).json({ message: "Something went wrong. Please try again." });
+  }
+}
+
+/**
+ * POST /api/auth/logout
+ * Deletes the refresh token from Redis (revokes the session) and clears
+ * the cookie.
+ */
+async function logout(req, res) {
+  try {
+    const token = req.cookies?.refreshToken;
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+        await deleteRefreshToken(decoded.userId);
+      } catch {
+        // Token already invalid/expired — nothing to revoke, proceed anyway
+      }
+    }
+
+    res.clearCookie("refreshToken", REFRESH_COOKIE_OPTIONS);
+    return res.status(200).json({ message: "Logged out successfully." });
+  } catch (error) {
+    console.error("Logout error:", error);
+    return res.status(500).json({ message: "Something went wrong. Please try again." });
+  }
+}
+
+export {
+  register,
+  verifyOwner,
+  resendOtpController,
+  login,
+  refreshTokenController,
+  logout,
+};

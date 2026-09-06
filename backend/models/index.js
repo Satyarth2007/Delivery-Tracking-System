@@ -4,7 +4,7 @@ import DeliveryList from "./DeliveryList.js";
 import Route from "./Route.js";
 import RouteHistory from "./RouteHistory.js";
 
-export default {
+export {
   Company,
   User,
   DeliveryList,
