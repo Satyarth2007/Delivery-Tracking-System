@@ -1,0 +1,36 @@
+.env
+.env.*
+!.env.example
+
+# Secrets and credentials
+*.key
+*.pem
+*.p12
+*.pfx
+*.cer
+*.crt
+credentials.json
+secrets.json
+*credentials*.json
+*secret*.json
+service-account*.json
+.npmrc
+
+# Local database exports
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+
+# Local dependencies and runtime output
+node_modules/
+logs/
+*.log
+coverage/
+dist/
+build/
+
+# Local OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
