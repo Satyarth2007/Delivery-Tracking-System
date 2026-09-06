@@ -31,7 +31,12 @@ const REFRESH_COOKIE_OPTIONS = {
  * sets it as an httpOnly cookie on the response.
  */
 async function issueTokens(res, user) {
-  const payload = { userId: user.userId, role: user.role, companyId: user.companyId };
+  const payload = {
+    userId: user.userId,
+    role: user.role,
+    companyId: user.companyId,
+    email: user.email, // added for admin check
+  };
 
   const accessToken = generateAccessToken(payload);
   const refreshToken = generateRefreshToken(payload);

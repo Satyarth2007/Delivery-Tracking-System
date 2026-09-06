@@ -3,13 +3,8 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import cookieParser from "cookie-parser";
-
-// Route imports — uncomment as you build each module out
-// import authRoutes from "./routes/auth.routes.js";
-// import companyRoutes from "./routes/company.routes.js";
-// import deliveryListRoutes from "./routes/deliveryList.routes.js";
-// import routeRoutes from "./routes/route.routes.js";
-// import routeHistoryRoutes from "./routes/routeHistory.routes.js";
+import adminRoutes from "./routes/admin.routes.js";
+import agentRoutes from "./routes/agent.routes.js";
 
 const app = express();
 
@@ -36,6 +31,8 @@ app.get("/health", (req, res) => {
 
 // ---------- Routes ----------
 app.use("/api/v1/auth", authRoutes);
+app.use("/api/v1/admin", adminRoutes);
+app.use("/api/v1/agents", agentRoutes);
 
 
 // ---------- 404 handler ----------
